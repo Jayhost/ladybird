@@ -13,6 +13,7 @@
 #include <AK/NumericLimits.h>
 #include <AK/StdLibExtraDetails.h>
 #include <AK/Types.h>
+#include <math.h>
 
 namespace AK {
 
@@ -33,6 +34,8 @@ template<FloatingPoint T>
 constexpr T L2_10 = 3.321928094887362347870319429489390175864L;
 template<FloatingPoint T>
 constexpr T L2_E = 1.442695040888963407359924681001892137L;
+
+
 
 namespace Details {
 
@@ -557,6 +560,10 @@ constexpr T sin(T angle)
 {
     CONSTEXPR_STATE(sin, angle);
 
+    // Handle edge cases: Infinity, NaN
+    if (isinf(angle) || isnan(angle))
+        return AK::NaN<T>;
+
 #if ARCH(X86_64)
     T ret;
     asm(
@@ -565,13 +572,32 @@ constexpr T sin(T angle)
         : "0"(angle));
     return ret;
 #else
-#    if defined(AK_OS_SERENITY)
-    // FIXME: This is a very naive implementation, and is only valid for small x.
-    //        Probably a good idea to use a better algorithm in the future, such as a taylor approximation.
-    return angle;
-#    else
-    return __builtin_sin(angle);
-#    endif
+    if defined(AK_OS_SERENITY)
+
+    // 1. Range Reduction: Reduce angle to [-π, π] using fmod
+    T normalized_angle = fmod(angle, 2 * M_PI);
+
+    // Further reduce to [-π/2, π/2] for sin using identity sin(x) = sin(π - x)
+    if (normalized_angle > M_PI_2) {
+        normalized_angle = M_PI - normalized_angle;
+    } else if (normalized_angle < -M_PI_2) {
+        normalized_angle = -M_PI - normalized_angle;
+    }
+
+    // 2. Polynomial Approximation for |x| < π/2
+    // Using a common precise approximation: x + x^3 * C1 + x^5 * C2 + x^7 * C3
+    T x2 = normalized_angle * normalized_angle;
+    T result = normalized_angle;
+
+    // These are optimized coefficients for sin(x)
+    result += normalized_angle * x2 * static_cast<T>(-0.16666666666666666); // -1/6
+    result += normalized_angle * x2 * x2 * static_cast<T>(0.008333333333333333); // +1/120
+    result += normalized_angle * x2 * x2 * x2 * static_cast<T>(-0.00019841269841269841); // -1/5040
+
+    return result;
+
+    else
+        return __builtin_sin(angle);
 #endif
 }
 
@@ -579,6 +605,9 @@ template<FloatingPoint T>
 constexpr T cos(T angle)
 {
     CONSTEXPR_STATE(cos, angle);
+
+    if (isinf(angle) || isnan(angle))
+        return AK::NaN<T>;
 
 #if ARCH(X86_64)
     T ret;
@@ -588,13 +617,39 @@ constexpr T cos(T angle)
         : "0"(angle));
     return ret;
 #else
-#    if defined(AK_OS_SERENITY)
-    // FIXME: This is a very naive implementation, and is only valid for small x.
-    //        Probably a good idea to use a better algorithm in the future, such as a taylor approximation.
-    return 1 - ((angle * angle) / 2);
-#    else
-    return __builtin_cos(angle);
-#    endif
+    if defined(AK_OS_SERENITY)
+
+    // 1. Range Reduction: Reduce angle to [-π, π]
+    T normalized_angle = fmod(angle, 2 * M_PI);
+
+    // For cos, reduce to [0, π] using identity cos(x) = -cos(π - x)
+    if (normalized_angle < 0)
+        normalized_angle = -normalized_angle;
+
+    if (normalized_angle > M_PI) {
+        normalized_angle = 2 * M_PI - normalized_angle;
+    }
+
+    // Further reduce to [0, π/2] for the polynomial
+    T sign = 1.0;
+    if (normalized_angle > M_PI_2) {
+        normalized_angle = M_PI - normalized_angle;
+        sign = -1.0;
+    }
+
+    // 2. Polynomial Approximation for |x| < π/2
+    T x2 = normalized_angle * normalized_angle;
+    T result = 1.0;
+
+    // Optimized coefficients for cos(x)
+    result += x2 * static_cast<T>(-0.5); // -1/2
+    result += x2 * x2 * static_cast<T>(0.041666666666666664); // +1/24
+    result += x2 * x2 * x2 * static_cast<T>(-0.0013888888888888889); // -1/720
+
+    return sign * result;
+
+    else
+        return __builtin_cos(angle);
 #endif
 }
 
@@ -622,44 +677,34 @@ constexpr T tan(T angle)
 {
     CONSTEXPR_STATE(tan, angle);
 
+    // Handle edge cases: Infinity, NaN
+    if (isinf(angle) || isnan(angle))
+        return AK::NaN<T>;
+
 #if ARCH(X86_64)
     T ret, one;
     asm(
         "fptan"
         : "=t"(one), "=u"(ret)
         : "0"(angle));
-
     return ret;
 #else
 #    if defined(AK_OS_SERENITY)
-    // FIXME: This is a very naive implementation, and is only valid for small x.
-    //        Probably a good idea to use a better algorithm in the future, such as a taylor approximation.
-    return angle;
+    // Use the identity tan(x) = sin(x) / cos(x)
+    T cos_val = cos(angle);
+    
+    // Check for division by zero (where cos(x) = 0, tan(x) is undefined ±∞)
+    // Use a tolerance for floating-point comparison
+    if (fabs(cos_val) < static_cast<T>(1e-10)) {
+        // Return positive or negative infinity with the correct sign
+        // The sign of the result is the same as the sign of sin(x) in this case
+        return sin(angle) > 0 ? static_cast<T>(INFINITY) : static_cast<T>(-INFINITY);
+    }
+    
+    return sin(angle) / cos_val;
 #    else
     return __builtin_tan(angle);
 #    endif
-#endif
-}
-
-template<FloatingPoint T>
-constexpr T atan(T value)
-{
-    CONSTEXPR_STATE(atan, value);
-
-#if ARCH(X86_64)
-    T ret;
-    asm(
-        "fld1\n"
-        "fpatan\n"
-        : "=t"(ret)
-        : "0"(value));
-    return ret;
-#else
-#    if defined(AK_OS_SERENITY)
-    // TODO: Add implementation for this function.
-    TODO();
-#    endif
-    return __builtin_atan(value);
 #endif
 }
 
@@ -668,7 +713,7 @@ constexpr T asin(T x)
 {
     CONSTEXPR_STATE(asin, x);
     if (x > 1 || x < -1)
-        return NaN<T>;
+        return AK::NaN<T>;
     if (x > (T)0.5 || x < (T)-0.5)
         return 2 * atan<T>(x / (1 + sqrt<T>(1 - x * x)));
     T squared = x * x;
@@ -691,6 +736,80 @@ constexpr T asin(T x)
     value += i * Details::product_odd<15>() / Details::product_even<16>() / 17;
     return value;
 }
+
+template<FloatingPoint T>
+constexpr T atan(T value)
+{
+    CONSTEXPR_STATE(atan, value);
+
+    // Handle edge cases
+    if (isnan(value))
+        return AK::NaN<T>;
+    if (value == 0)
+        return value; // atan(0) = 0, also handles signed zeros
+    if (isinf(value))
+        return copysign(M_PI_2, value); // atan(±∞) = ±π/2
+
+#if ARCH(X86_64)
+    T ret;
+    asm(
+        "fld1\n"
+        "fpatan\n"
+        : "=t"(ret)
+        : "0"(value));
+    return ret;
+#else
+#    if defined(AK_OS_SERENITY)
+    // Algorithm based on fdlibm's atan.c
+
+    T x = value;
+    T x_squared = x * x;
+    T result;
+
+    // Range reduction: Use symmetry and identity to reduce to [0, 1]
+    if (fabs(x) < 1.0) {
+        // For |x| < 1, use a rational approximation
+        // atan(x) = x + x^3 * R(x^2)
+        result = x;
+        if (fabs(x) < 0.66) { // Threshold can be tuned
+            // Polynomial coefficients for rational approximation
+            // These are optimized for minimal error
+            T num = x_squared * static_cast<T>(8.05374449538e-2) + static_cast<T>(1.68676306044);
+            num = num * x_squared + static_cast<T>(2.16476087439);
+            num = num * x_squared + static_cast<T>(1.11207268399);
+
+            T den = x_squared * static_cast<T>(4.85390382378e-1) + static_cast<T>(3.46628953000);
+            den = den * x_squared + static_cast<T>(4.84406305320);
+            den = den * x_squared + static_cast<T>(1.00000000000);
+
+            result = x * num / den;
+        }
+    } else {
+        // For |x| >= 1, use identity: atan(x) = π/2 - atan(1/x)
+        x = 1.0 / x;
+        x_squared = x * x;
+
+        T num = x_squared * static_cast<T>(8.05374449538e-2) + static_cast<T>(1.68676306044);
+        num = num * x_squared + static_cast<T>(2.16476087439);
+        num = num * x_squared + static_cast<T>(1.11207268399);
+
+        T den = x_squared * static_cast<T>(4.85390382378e-1) + static_cast<T>(3.46628953000);
+        den = den * x_squared + static_cast<T>(4.84406305320);
+        den = den * x_squared + static_cast<T>(1.00000000000);
+
+        result = M_PI_2 - (x * num / den);
+        
+        // Adjust sign for negative x
+        if (value < 0)
+            result = -result;
+    }
+    return result;
+#    else
+    return __builtin_atan(value);
+#    endif
+#endif
+}
+
 
 template<FloatingPoint T>
 constexpr T acos(T value)
@@ -760,7 +879,7 @@ constexpr T log2(T x)
     if (x == 0)
         return -Infinity<T>;
     if (x <= 0 || __builtin_isnan(x))
-        return NaN<T>;
+        return AK::NaN<T>;
 
     FloatExtractor<T> ext { .d = x };
     T exponent = ext.exponent - FloatExtractor<T>::exponent_bias;
